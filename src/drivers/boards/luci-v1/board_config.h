@@ -56,7 +56,7 @@ __BEGIN_DECLS
 #define UDID_START		0x1FFF7A10
 
 /* FIXME Luci Revision E2 Error Patches (Remove this after revision E2) */
-#define LUCI_NO_MMCSD /* Rev E2's SD Card is unusable, and trying to init mmcsd will cause the FMU to crash. */
+//#define LUCI_NO_MMCSD /* Rev E2's SD Card is unusable, and trying to init mmcsd will cause the FMU to crash. */
 
 /* Sensor rotation for LSM Gyro */
 #define SENSOR_BOARD_ROTATION_DEFAULT		(2) /* SENSOR_BOARD_ROTATION_180_DEG */
