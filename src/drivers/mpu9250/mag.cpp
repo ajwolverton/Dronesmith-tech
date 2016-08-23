@@ -287,8 +287,12 @@ MPU9250_mag::measure(struct ak8963_regs data)
 	float zraw_f = -data.z;
 
 	#if defined(CONFIG_ARCH_BOARD_LUCI_V1)
-		mrb.y_raw = -mrb.y_raw;
-		yraw_f = -yraw_f;
+		float tempx = xraw_f;
+		mrb.x_raw = -mrb.y_raw;
+		mrb.y_raw = -mrb.x_raw;
+		xraw_f = -yraw_f;
+		yraw_f = -tempx;
+
 		mrb.z_raw = -mrb.z_raw;
 		zraw_f = -zraw_f;
 	#endif

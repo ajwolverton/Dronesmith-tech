@@ -1060,8 +1060,8 @@ L3GD20::measure()
 #endif
 
 #if defined (CONFIG_ARCH_BOARD_LUCI_V1)
-	int16_t tx = -report.y_raw;
-	int16_t ty = -report.x_raw;
+	int16_t tx = report.y_raw;
+	int16_t ty = report.x_raw;
 	int16_t tz = -report.z_raw;
 	report.x_raw = tx;
 	report.y_raw = ty;
