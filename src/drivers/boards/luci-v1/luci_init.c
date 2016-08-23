@@ -206,7 +206,7 @@ __EXPORT int nsh_archinitialize(void)
 	px4_arch_configgpio(GPIO_SPEKTRUM_PWR_EN);
 
 	// FIXME - when we get SBUS
-	//px4_arch_configgpio(GPIO_SBUS_INV);
+	px4_arch_configgpio(GPIO_SBUS_INV);
 
 	#ifdef GPIO_RC_OUT
 		px4_arch_configgpio(GPIO_RC_OUT);      /* Serial RC output pin */
@@ -293,7 +293,7 @@ __EXPORT int nsh_archinitialize(void)
 	SPI_SETFREQUENCY(spi1, 10000000);
 	SPI_SETBITS(spi1, 8);
 	SPI_SETMODE(spi1, SPIDEV_MODE3);
-	SPI_SELECT(spi1, PX4_SPIDEV_EXT0, false);
+	// SPI_SELECT(spi1, PX4_SPIDEV_EXT0, false);
 	SPI_SELECT(spi1, PX4_SPIDEV_EXT1, false);
 
 #ifndef LUCI_NO_MMCSD
