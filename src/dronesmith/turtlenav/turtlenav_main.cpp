@@ -82,6 +82,61 @@ TurtleNav::~TurtleNav()
 }
 
 void
+TurtleNav::local_position_update()
+{
+	orb_copy(ORB_ID(vehicle_local_position), _local_pos_sub, &_local_pos);
+}
+
+void
+TurtleNav::vehicle_status_update()
+{
+	if (orb_copy(ORB_ID(vehicle_status), _vstatus_sub, &_vstatus) != OK) {
+		/* in case the commander is not running */
+		_vstatus.arming_state = vehicle_status_s::ARMING_STATE_STANDBY;
+	}
+}
+
+void
+TurtleNav::vehicle_land_detected_update()
+{
+	orb_copy(ORB_ID(vehicle_land_detected), _land_detected_sub, &_land_detected);
+}
+
+void
+TurtleNav::vehicle_control_mode_update()
+{
+	if (orb_copy(ORB_ID(vehicle_control_mode), _control_mode_sub, &_control_mode) != OK) {
+		/* in case the commander is not running */
+		_control_mode.flag_control_auto_enabled = false;
+		_control_mode.flag_armed = false;
+	}
+}
+
+void
+TurtleNav::params_update()
+{
+	parameter_update_s param_update;
+	orb_copy(ORB_ID(parameter_update), _param_update_sub, &param_update);
+}
+
+void
+TurtleNav::sensor_combined_update()
+{
+	orb_copy(ORB_ID(sensor_combined), _sensor_combined_sub, &_sensor_combined);
+}
+
+void
+TurtleNav::home_position_update(bool force)
+{
+	bool updated = false;
+	orb_check(_home_pos_sub, &updated);
+
+	if (updated || force) {
+		orb_copy(ORB_ID(home_position), _home_pos_sub, &_home_pos);
+	}
+}
+
+void
 TurtleNav::task_main_trampoline(int argc, char *argv[])
 {
 	turtlenav::g_turtlenav->task_main();
@@ -91,51 +146,180 @@ void
 TurtleNav::task_main()
 {
 
-	/* Try to load the geofence:
-	 * if /fs/microsd/etc/geofence.txt load from this file
-	 * else clear geofence data in datamanager */
-
 	/* do subscriptions */
+  _local_pos_sub = orb_subscribe(ORB_ID(vehicle_local_position));
+	_sensor_combined_sub = orb_subscribe(ORB_ID(sensor_combined));
+	_vstatus_sub = orb_subscribe(ORB_ID(vehicle_status));
+	_land_detected_sub = orb_subscribe(ORB_ID(vehicle_land_detected));
+	_control_mode_sub = orb_subscribe(ORB_ID(vehicle_control_mode));
+	_home_pos_sub = orb_subscribe(ORB_ID(home_position));
+	_param_update_sub = orb_subscribe(ORB_ID(parameter_update));
+	_vehicle_command_sub = orb_subscribe(ORB_ID(vehicle_command));
 
+  // XXX missions?
+  //_onboard_mission_sub = orb_subscribe(ORB_ID(onboard_mission));
+  //_offboard_mission_sub = orb_subscribe(ORB_ID(offboard_mission));
 
 	/* copy all topics first time */
+  vehicle_status_update();
+  vehicle_land_detected_update();
+  vehicle_control_mode_update();
+  local_position_update();
+  sensor_combined_update();
+  home_position_update(true);
+  params_update();
 
 	/* wakeup source(s) */
+  px4_pollfd_struct_t fds[2] = {};
 
 	/* Setup of loop */
+  fds[0].fd = _local_pos_sub;
+	fds[0].events = POLLIN;
+	fds[1].fd = _vehicle_command_sub;
+	fds[1].events = POLLIN;
 
+  bool local_pos_available_once = false;
 
 	while (!_task_should_exit) {
 
 		/* wait for up to 200ms for data */
+    int pret = px4_poll(&fds[0], (sizeof(fds) / sizeof(fds[0])), 1000);
+
+    if (pret == 0) {
+      /* timed out - periodic check for _task_should_exit, etc. */
+      if (local_pos_available_once) {
+        local_pos_available_once = false;
+        PX4_WARN("turtle: local position timeout");
+      }
+      /* Let the loop run anyway, don't do `continue` here. */
+
+    } else if (pret < 0) {
+      /* this is undesirable but not much we can do - might want to flag unhappy status */
+      PX4_WARN("turtle: poll error %d, %d", pret, errno);
+      continue;
+    } else {
+      /* success, global pos was available */
+      local_pos_available_once = true;
+    }
 
 		perf_begin(_loop_perf);
 
-		//bool updated;
-
-		/* gps updated */
+		bool updated;
 
 		/* sensors combined updated */
+    orb_check(_sensor_combined_sub, &updated);
+		if (updated) {
+			sensor_combined_update();
+		}
 
 		/* parameters updated */
+    orb_check(_param_update_sub, &updated);
+		if (updated) {
+			params_update();
+			//updateParams();
+		}
 
 		/* vehicle control mode updated */
+    orb_check(_control_mode_sub, &updated);
+		if (updated) {
+			vehicle_control_mode_update();
+		}
 
 		/* vehicle status updated */
+    orb_check(_vstatus_sub, &updated);
+		if (updated) {
+			vehicle_status_update();
+		}
 
 		/* vehicle land detected updated */
-
-		/* navigation capabilities updated */
+    orb_check(_land_detected_sub, &updated);
+		if (updated) {
+			vehicle_land_detected_update();
+		}
 
 		/* home position updated */
+    orb_check(_home_pos_sub, &updated);
+		if (updated) {
+			home_position_update();
+		}
 
-		/* global position updated */
+    orb_check(_vehicle_command_sub, &updated);
+		if (updated) {
+			vehicle_command_s cmd;
+			orb_copy(ORB_ID(vehicle_command), _vehicle_command_sub, &cmd);
 
-		/* Check geofence violation */
+			if (cmd.command == vehicle_command_s::VEHICLE_CMD_DO_REPOSITION) {
+        warnx("VEHICLE_CMD_DO_REPOSITION -> Move drone in NED_REL coordinate frame.");
+
+				// store current position as previous position and goal as next
+
+				// Go on and check which changes had been requested
+
+			} else if (cmd.command == vehicle_command_s::VEHICLE_CMD_NAV_TAKEOFF) {
+        warnx("VEHICLE_CMD_NAV_TAKEOFF -> Do an indoor takeoff");
+
+				// store current position as previous position and goal as next
+
+			} else if (cmd.command == vehicle_command_s::VEHICLE_CMD_DO_PAUSE_CONTINUE) {
+				warnx("VEHICLE_CMD_DO_PAUSE_CONTINUE -> hold position");
+			}
+		}
+
+		/* local position updated */
+    if (fds[0].revents & POLLIN) {
+			local_position_update();
+		}
 
 		/* Do stuff according to navigation state set by commander */
-
-		/* iterate through navigation modes and set active/inactive for each */
+    switch (_vstatus.nav_state) {
+			case vehicle_status_s::NAVIGATION_STATE_MANUAL:
+			case vehicle_status_s::NAVIGATION_STATE_ACRO:
+			case vehicle_status_s::NAVIGATION_STATE_ALTCTL:
+			case vehicle_status_s::NAVIGATION_STATE_POSCTL:
+			case vehicle_status_s::NAVIGATION_STATE_TERMINATION:
+			case vehicle_status_s::NAVIGATION_STATE_OFFBOARD:
+        warnx("Nav state not valid for auto control. Turtle not doing anything.");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION:
+				warnx("Nav state mission. Turtle moves to a NED point.");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER:
+				warnx("Nav state loiter. Turtle just hangs out.");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_RCRECOVER:
+				warnx("Nav state RC recover. Turtle does something?");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_RTL:
+				warnx("Nav state auto RTL. Turtle flies to takeoff point.");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF:
+				warnx("Nav state takeoff. Turtle takes off to 1 or 1.5 meters.");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_LAND:
+				warnx("Nav state land. Turtle descends to ground.");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_DESCEND:
+				warnx("Nav state descend. Turtle perpetually descends?");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_RTGS:
+				/* Use complex data link loss mode only when enabled via param
+				* otherwise use rtl */
+				warnx("Nav state auto RTGS. Will probably ignore this.");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_LANDENGFAIL:
+				warnx("Nav state auto landing fail. Will probably ignore this.");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_LANDGPSFAIL:
+				warnx("Nav state auto landing gps fail. We don't even use GPS, haha!");
+				break;
+			case vehicle_status_s::NAVIGATION_STATE_AUTO_FOLLOW_TARGET:
+				warnx("Nav state auto RTGS. We won't be implementing this.");
+				break;
+			default:
+				//_navigation_mode = nullptr;
+				//_can_loiter_at_sp = false;
+				break;
+		}
 
 		/* if nothing is running, set position setpoint triplet invalid once */
 
