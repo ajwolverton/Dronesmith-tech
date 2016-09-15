@@ -58,6 +58,8 @@ private:
 	bool	_task_should_exit;		  /**< if true, sensor task should exit */
 	int		_turtlenav_task;		    /**< task handle for sensor task */
 
+  orb_advert_t	_mavlink_log_pub;		/**< the uORB advert to send messages over mavlink */
+
 	perf_counter_t	_loop_perf;		/**< loop performance counter */
 
   int		_local_pos_sub;		      /**< local position subscription */
@@ -68,6 +70,8 @@ private:
 	int		_control_mode_sub;	    /**< vehicle control mode subscription */
 	int		_param_update_sub;	    /**< param update subscription */
 	int		_vehicle_command_sub;	  /**< vehicle commands (onboard and offboard) */
+
+  orb_advert_t	_pos_sp_triplet_pub;		/**< publish position setpoint triplet */
 
   vehicle_status_s				    _vstatus;		       /**< vehicle status */
 	vehicle_land_detected_s		  _land_detected;		 /**< vehicle land_detected */
@@ -80,12 +84,15 @@ private:
 	position_setpoint_triplet_s			_reposition_triplet;	/**< triplet for non-mission direct position command */
 	position_setpoint_triplet_s			_takeoff_triplet;	    /**< triplet for non-mission direct takeoff command */
 
+  bool		_can_loiter_at_sp;			                      /**< flags if current position SP can be used to loiter */
+	bool		_pos_sp_triplet_updated;		                  /**< flags if position SP triplet needs to be published */
+	bool 		_pos_sp_triplet_published_invalid_once;	      /**< flags if position SP triplet has been published once to UORB */
 
   /**
    * Retrieve local position
    */
   void		local_position_update();
-  
+
   /**
    * Retrieve sensor values
    */
@@ -115,6 +122,31 @@ private:
    * Update parameters
    */
   void		params_update();
+
+  /**
+   * Publish a new position setpoint triplet for position controllers
+   */
+  void		publish_position_setpoint_triplet();
+
+  //
+  // Update mission
+  //
+  void    updateMission();
+
+  //
+  // Update landing
+  //
+  void    updateLand();
+
+  //
+  // Update takeoff
+  //
+  void    updateTakeOff();
+
+  //
+  // Update loiter
+  //
+  void    updateLoiter();
 
 	/**
 	 * Shim for calling task_main from task_create.

@@ -26,11 +26,7 @@
  #include <uORB/uORB.h>
  #include <uORB/topics/home_position.h>
  #include <uORB/topics/vehicle_status.h>
- #include <uORB/topics/mission.h>
- #include <uORB/topics/fence.h>
- #include <uORB/topics/fw_pos_ctrl_status.h>
  #include <uORB/topics/vehicle_command.h>
- #include <drivers/drv_baro.h>
 
  #include <systemlib/err.h>
  #include <systemlib/systemlib.h>
@@ -45,15 +41,36 @@ extern "C" __EXPORT int turtlenav_main(int argc, char *argv[]);
 
 namespace turtlenav
 {
-
-TurtleNav	*g_turtlenav;
+  TurtleNav	*g_turtlenav;
 }
 
 TurtleNav::TurtleNav() :
   _task_should_exit(false),
-  _turtlenav_task(-1)
+  _turtlenav_task(-1),
+  _mavlink_log_pub(nullptr),
+	_loop_perf(perf_alloc(PC_ELAPSED, "turtlenav")),
+	_local_pos_sub(-1),
+	_sensor_combined_sub(-1),
+	_home_pos_sub(-1),
+	_vstatus_sub(-1),
+	_land_detected_sub(-1),
+	_control_mode_sub(-1),
+	_param_update_sub(-1),
+	_vehicle_command_sub(-1),
+	_pos_sp_triplet_pub(nullptr),
+	_vstatus{},
+	_land_detected{},
+	_control_mode{},
+	_local_pos{},
+	_sensor_combined{},
+	_home_pos{},
+	_pos_sp_triplet{},
+	_reposition_triplet{},
+	_takeoff_triplet{},
+	_can_loiter_at_sp(false),
+	_pos_sp_triplet_updated(false),
+	_pos_sp_triplet_published_invalid_once(false)
 {
-
 }
 
 TurtleNav::~TurtleNav()
@@ -137,6 +154,26 @@ TurtleNav::home_position_update(bool force)
 }
 
 void
+TurtleNav::publish_position_setpoint_triplet()
+{
+	/* update navigation state */
+	_pos_sp_triplet.nav_state = _vstatus.nav_state;
+
+	/* do not publish an empty triplet */
+	if (!_pos_sp_triplet.current.valid) {
+		return;
+	}
+
+	/* lazily publish the position setpoint triplet only once available */
+	if (_pos_sp_triplet_pub != nullptr) {
+		orb_publish(ORB_ID(position_setpoint_triplet), _pos_sp_triplet_pub, &_pos_sp_triplet);
+
+	} else {
+		_pos_sp_triplet_pub = orb_advertise(ORB_ID(position_setpoint_triplet), &_pos_sp_triplet);
+	}
+}
+
+void
 TurtleNav::task_main_trampoline(int argc, char *argv[])
 {
 	turtlenav::g_turtlenav->task_main();
@@ -145,6 +182,7 @@ TurtleNav::task_main_trampoline(int argc, char *argv[])
 void
 TurtleNav::task_main()
 {
+  bool noNavState = false;
 
 	/* do subscriptions */
   _local_pos_sub = orb_subscribe(ORB_ID(vehicle_local_position));
@@ -216,7 +254,6 @@ TurtleNav::task_main()
     orb_check(_param_update_sub, &updated);
 		if (updated) {
 			params_update();
-			//updateParams();
 		}
 
 		/* vehicle control mode updated */
@@ -278,50 +315,73 @@ TurtleNav::task_main()
 			case vehicle_status_s::NAVIGATION_STATE_POSCTL:
 			case vehicle_status_s::NAVIGATION_STATE_TERMINATION:
 			case vehicle_status_s::NAVIGATION_STATE_OFFBOARD:
-        warnx("Nav state not valid for auto control. Turtle not doing anything.");
+        _can_loiter_at_sp = false;
+        noNavState = true;
+        // no update
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION:
-				warnx("Nav state mission. Turtle moves to a NED point.");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateMission();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER:
-				warnx("Nav state loiter. Turtle just hangs out.");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateLoiter();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_RCRECOVER:
-				warnx("Nav state RC recover. Turtle does something?");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateLoiter();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_RTL:
-				warnx("Nav state auto RTL. Turtle flies to takeoff point.");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateLand();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF:
-				warnx("Nav state takeoff. Turtle takes off to 1 or 1.5 meters.");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateTakeOff();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_LAND:
-				warnx("Nav state land. Turtle descends to ground.");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateLand();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_DESCEND:
-				warnx("Nav state descend. Turtle perpetually descends?");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateLand();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_RTGS:
-				/* Use complex data link loss mode only when enabled via param
-				* otherwise use rtl */
-				warnx("Nav state auto RTGS. Will probably ignore this.");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateLand();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_LANDENGFAIL:
-				warnx("Nav state auto landing fail. Will probably ignore this.");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateLand(); // XXX probably should do dedicate update.
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_LANDGPSFAIL:
-				warnx("Nav state auto landing gps fail. We don't even use GPS, haha!");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateLoiter(); // XXX we don't care about GPS.
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_FOLLOW_TARGET:
-				warnx("Nav state auto RTGS. We won't be implementing this.");
+        _pos_sp_triplet_published_invalid_once = false;
+        updateLoiter(); // Not implenting this.
 				break;
 			default:
-				//_navigation_mode = nullptr;
-				//_can_loiter_at_sp = false;
+        noNavState = true;
+				_can_loiter_at_sp = false;
 				break;
 		}
 
 		/* if nothing is running, set position setpoint triplet invalid once */
+    if (noNavState && !_pos_sp_triplet_published_invalid_once) {
+			_pos_sp_triplet_published_invalid_once = true;
+			_pos_sp_triplet.previous.valid = false;
+			_pos_sp_triplet.current.valid = false;
+			_pos_sp_triplet.next.valid = false;
+			_pos_sp_triplet_updated = true;
+		}
+
+		if (_pos_sp_triplet_updated) {
+			publish_position_setpoint_triplet();
+			_pos_sp_triplet_updated = false;
+		}
 
 		perf_end(_loop_perf);
 	}
@@ -329,6 +389,30 @@ TurtleNav::task_main()
 
 	_turtlenav_task = -1;
 	return;
+}
+
+void
+TurtleNav::updateMission()
+{
+
+}
+
+void
+TurtleNav::updateLand()
+{
+
+}
+
+void
+TurtleNav::updateLoiter()
+{
+
+}
+
+void
+TurtleNav::updateTakeOff() 
+{
+
 }
 
 int
