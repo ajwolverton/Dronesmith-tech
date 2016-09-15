@@ -166,6 +166,16 @@ TurtleNav::publish_position_setpoint_triplet()
 
 	/* lazily publish the position setpoint triplet only once available */
 	if (_pos_sp_triplet_pub != nullptr) {
+    // warnx("publishing pos triplet");
+    // double cx = (double)_pos_sp_triplet.current.x;
+    // double cy = (double)_pos_sp_triplet.current.y;
+    // double cz = (double)_pos_sp_triplet.current.z;
+    // printf("%f ", cx);
+    // printf("%f ", cy);
+    // printf("%f\n", cz);
+
+    //_pos_sp_triplet.current.valid = true;
+    //_pos_sp_triplet.current.x = 5.0;
 		orb_publish(ORB_ID(position_setpoint_triplet), _pos_sp_triplet_pub, &_pos_sp_triplet);
 
 	} else {
@@ -293,9 +303,36 @@ TurtleNav::task_main()
 				// Go on and check which changes had been requested
 
 			} else if (cmd.command == vehicle_command_s::VEHICLE_CMD_NAV_TAKEOFF) {
+        struct position_setpoint_triplet_s *rep = &_takeoff_triplet;
+        struct vehicle_local_position_s *loc = &_local_pos;
+
         warnx("VEHICLE_CMD_NAV_TAKEOFF -> Do an indoor takeoff");
 
-				// store current position as previous position and goal as next
+				//store current position as previous position and goal as next
+				rep->previous.yaw = loc->yaw;
+				rep->previous.x = loc->x;
+				rep->previous.y = loc->y;
+				rep->previous.z = loc->z;
+
+				//rep->current.loiter_radius = get_loiter_radius();
+				//rep->current.loiter_direction = 1;
+				rep->current.type = position_setpoint_s::SETPOINT_TYPE_TAKEOFF;
+				rep->current.yaw = cmd.param4;
+
+				if (PX4_ISFINITE(cmd.param5) && PX4_ISFINITE(cmd.param6)) {
+					rep->current.x = cmd.param5;
+					rep->current.y = cmd.param6;
+				} else {
+					// If one of them is non-finite, reset both
+					rep->current.lat = NAN;
+					rep->current.lon = NAN;
+				}
+
+				rep->current.z = cmd.param7;
+
+				rep->previous.valid = true;
+				rep->current.valid = true;
+				rep->next.valid = false;
 
 			} else if (cmd.command == vehicle_command_s::VEHICLE_CMD_DO_PAUSE_CONTINUE) {
 				warnx("VEHICLE_CMD_DO_PAUSE_CONTINUE -> hold position");
@@ -410,9 +447,30 @@ TurtleNav::updateLoiter()
 }
 
 void
-TurtleNav::updateTakeOff() 
+TurtleNav::updateTakeOff()
 {
+  struct position_setpoint_triplet_s *rep = &_takeoff_triplet;
+  struct position_setpoint_triplet_s *up = &_pos_sp_triplet;
 
+  up->previous.valid = false;
+	up->current.yaw_valid = true;
+	up->next.valid = false;
+  up->current.valid = true; // HACK - shouldn't be here.
+
+  up->current.z = rep->current.z;
+
+  // Go on and check which changes had been requested
+  if (PX4_ISFINITE(rep->current.yaw)) {
+    up->current.yaw = rep->current.yaw;
+  }
+
+  if (PX4_ISFINITE(rep->current.x) && PX4_ISFINITE(rep->current.y)) {
+    up->current.x = rep->current.x;
+    up->current.y = rep->current.y;
+  }
+
+  // mark this as done
+  memset(rep, 0, sizeof(*rep));
 }
 
 int
