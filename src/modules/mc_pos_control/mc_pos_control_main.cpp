@@ -1053,8 +1053,8 @@ void MulticopterPositionControl::control_auto(float dt)
 
 		math::Vector<3> cruising_speed = _params.vel_cruise;
 
-		if (PX4_ISFINITE(_pos_sp_triplet.current.cruising_speed) &&
-		    _pos_sp_triplet.current.cruising_speed > 0.1f) {
+		if (PX4_ISFINITE(_pos_sp_triplet.current.cruising_speed) /*&&
+		    _pos_sp_triplet.current.cruising_speed > 0.1f*/) {
 			cruising_speed(0) = _pos_sp_triplet.current.cruising_speed;
 			cruising_speed(1) = _pos_sp_triplet.current.cruising_speed;
 		}
@@ -1191,6 +1191,7 @@ void MulticopterPositionControl::control_auto(float dt)
 
 	} else {
 		/* no waypoint, do nothing, setpoint was already reset */
+		printf("WP Not valid\n");
 	}
 }
 

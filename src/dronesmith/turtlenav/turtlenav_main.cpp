@@ -69,7 +69,8 @@ TurtleNav::TurtleNav() :
 	_takeoff_triplet{},
 	_can_loiter_at_sp(false),
 	_pos_sp_triplet_updated(false),
-	_pos_sp_triplet_published_invalid_once(false)
+	_pos_sp_triplet_published_invalid_once(false),
+  _turtle_cmd(TURTLECMD_TAKEOFF)
 {
 }
 
@@ -303,16 +304,15 @@ TurtleNav::task_main()
 				// Go on and check which changes had been requested
 
 			} else if (cmd.command == vehicle_command_s::VEHICLE_CMD_NAV_TAKEOFF) {
-        struct position_setpoint_triplet_s *rep = &_takeoff_triplet;
-        struct vehicle_local_position_s *loc = &_local_pos;
+        struct position_setpoint_triplet_s *rep = get_takeoff_triplet();
 
         warnx("VEHICLE_CMD_NAV_TAKEOFF -> Do an indoor takeoff");
 
 				//store current position as previous position and goal as next
-				rep->previous.yaw = loc->yaw;
-				rep->previous.x = loc->x;
-				rep->previous.y = loc->y;
-				rep->previous.z = loc->z;
+				rep->previous.yaw = get_local_position()->yaw;
+				rep->previous.x = get_local_position()->x;
+				rep->previous.y = get_local_position()->y;
+				rep->previous.z = get_local_position()->z;
 
 				//rep->current.loiter_radius = get_loiter_radius();
 				//rep->current.loiter_direction = 1;
@@ -320,12 +320,12 @@ TurtleNav::task_main()
 				rep->current.yaw = cmd.param4;
 
 				if (PX4_ISFINITE(cmd.param5) && PX4_ISFINITE(cmd.param6)) {
-					rep->current.x = cmd.param5;
-					rep->current.y = cmd.param6;
+          rep->current.x = cmd.param5;
+				  rep->current.y = cmd.param6;
 				} else {
 					// If one of them is non-finite, reset both
-					rep->current.lat = NAN;
-					rep->current.lon = NAN;
+					rep->current.x = rep->previous.x;
+					rep->current.y = rep->previous.y;
 				}
 
 				rep->current.z = cmd.param7;
@@ -333,6 +333,21 @@ TurtleNav::task_main()
 				rep->previous.valid = true;
 				rep->current.valid = true;
 				rep->next.valid = false;
+
+        {
+          warnx("Takeoff Evaluation Summary");
+          double dyaw = (double)rep->previous.yaw;
+          double dx = (double)rep->previous.x;
+          double dy = (double)rep->previous.y;
+          double dz = (double)rep->previous.z;
+          printf("LPE: (xyz) %f %f %f %fdeg\n", dx, dy, dz, dyaw);
+
+          dyaw = (double)rep->current.yaw;
+          dx = (double)rep->current.x;
+          dy = (double)rep->current.y;
+          dz = (double)rep->current.z;
+          printf("Position Target: (xyz) %f %f %f %fdeg\n", dx, dy, dz, dyaw);
+        }
 
 			} else if (cmd.command == vehicle_command_s::VEHICLE_CMD_DO_PAUSE_CONTINUE) {
 				warnx("VEHICLE_CMD_DO_PAUSE_CONTINUE -> hold position");
@@ -358,47 +373,59 @@ TurtleNav::task_main()
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_MISSION:
         _pos_sp_triplet_published_invalid_once = false;
-        updateMission();
+        noNavState = false;
+        updateCmd();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_LOITER:
         _pos_sp_triplet_published_invalid_once = false;
-        updateLoiter();
+        noNavState = false;
+        updateCmd();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_RCRECOVER:
         _pos_sp_triplet_published_invalid_once = false;
-        updateLoiter();
+        noNavState = false;
+        updateCmd();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_RTL:
         _pos_sp_triplet_published_invalid_once = false;
-        updateLand();
+        noNavState = false;
+        updateCmd();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_TAKEOFF:
         _pos_sp_triplet_published_invalid_once = false;
+        noNavState = false;
+        //updateCmd();
         updateTakeOff();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_LAND:
         _pos_sp_triplet_published_invalid_once = false;
-        updateLand();
+        noNavState = false;
+        updateCmd();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_DESCEND:
         _pos_sp_triplet_published_invalid_once = false;
-        updateLand();
+        noNavState = false;
+        updateCmd();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_RTGS:
         _pos_sp_triplet_published_invalid_once = false;
-        updateLand();
+        noNavState = false;
+        updateCmd();
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_LANDENGFAIL:
         _pos_sp_triplet_published_invalid_once = false;
-        updateLand(); // XXX probably should do dedicate update.
+        noNavState = false;
+        updateCmd(); // XXX probably should do dedicate update.
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_LANDGPSFAIL:
         _pos_sp_triplet_published_invalid_once = false;
-        updateLoiter(); // XXX we don't care about GPS.
+        noNavState = false;
+        updateCmd(); // XXX we don't care about GPS.
 				break;
 			case vehicle_status_s::NAVIGATION_STATE_AUTO_FOLLOW_TARGET:
         _pos_sp_triplet_published_invalid_once = false;
-        updateLoiter(); // Not implenting this.
+        noNavState = false;
+        updateCmd(); // Not implenting this.
 				break;
 			default:
         noNavState = true;
@@ -429,6 +456,26 @@ TurtleNav::task_main()
 }
 
 void
+TurtleNav::updateCmd()
+{
+  switch (_turtle_cmd) {
+  case TURTLECMD_TAKEOFF:
+    updateTakeOff();
+    break;
+
+  case TURTLECMD_LAND:
+    updateLand();
+    break;
+
+  case TURTLECMD_HOLD:
+    updateLoiter();
+    break;
+  default:
+    _turtle_cmd = TURTLECMD_HOLD;
+  }
+}
+
+void
 TurtleNav::updateMission()
 {
 
@@ -443,34 +490,179 @@ TurtleNav::updateLand()
 void
 TurtleNav::updateLoiter()
 {
+  struct position_setpoint_triplet_s* pos_sp_triplet = get_position_setpoint_triplet();
 
+  pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_LOITER;
+  pos_sp_triplet->current.valid = true;
+  pos_sp_triplet->current.disable_mc_yaw_control = false;
+  pos_sp_triplet->current.cruising_speed = 0.00000;
+  pos_sp_triplet->current.cruising_throttle = 0.0;
+  pos_sp_triplet->current.yaw = get_local_position()->yaw;
+  pos_sp_triplet->current.x = get_local_position()->x;
+  pos_sp_triplet->current.y = get_local_position()->y;
+  pos_sp_triplet->current.z = get_local_position()->z;
+  pos_sp_triplet->next.valid = false;
+  pos_sp_triplet->previous.valid = false;
 }
 
 void
 TurtleNav::updateTakeOff()
 {
-  struct position_setpoint_triplet_s *rep = &_takeoff_triplet;
-  struct position_setpoint_triplet_s *up = &_pos_sp_triplet;
+  struct position_setpoint_triplet_s* rep = get_takeoff_triplet();
 
-  up->previous.valid = false;
-	up->current.yaw_valid = true;
-	up->next.valid = false;
-  up->current.valid = true; // HACK - shouldn't be here.
+  // FIXME - currently not valid? Not sure why yet.
+  // Maybe local positions aren't valid?
+  if (rep->current.valid) {
+    printf("Takeoff valid, updating current position setpoint.\n");
+    // XXX update mission? I don't think we'll need that but leaving note here.
 
-  up->current.z = rep->current.z;
+    // Get local set point
+    struct position_setpoint_triplet_s* pos_sp_triplet = get_position_setpoint_triplet();
 
-  // Go on and check which changes had been requested
-  if (PX4_ISFINITE(rep->current.yaw)) {
-    up->current.yaw = rep->current.yaw;
+    // Keep old state from being processed.
+    pos_sp_triplet->previous.valid = false;
+
+    // Update position setpoint logistics
+    pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_TAKEOFF;
+    pos_sp_triplet->current.valid = true;
+    pos_sp_triplet->current.disable_mc_yaw_control = false;
+    pos_sp_triplet->current.cruising_speed = 0.00001;
+    pos_sp_triplet->current.cruising_throttle = 0.0;
+
+    // Make sure future state is invalid.
+    pos_sp_triplet->next.valid = false;
+
+    // Update alt setpoint if valid.
+    if (PX4_ISFINITE(rep->current.z)) {
+      pos_sp_triplet->current.z = rep->current.z;
+    }
+
+    // Update yaw to be takeoff yaw if requested.
+    // Otherwise, set to default.
+    // TODO - set home position yaw if available?
+    if (PX4_ISFINITE(rep->current.yaw)) {
+      pos_sp_triplet->current.yaw = rep->current.yaw;
+    } else {
+      pos_sp_triplet->current.yaw = 0.0;
+    }
+
+    // Either way, we'll let pos ctrl update yaw.
+    pos_sp_triplet->current.yaw_valid = true;
+
+    // Update local position if requested.
+    if (PX4_ISFINITE(rep->current.x) && PX4_ISFINITE(rep->current.y)) {
+      pos_sp_triplet->current.x = rep->current.x;
+      pos_sp_triplet->current.y = rep->current.y;
+    }
+
+    // mark this as done
+    memset(rep, 0, sizeof(*rep));
+
+    set_can_loiter_at_sp(true);
+    set_position_setpoint_triplet_updated();
+  } else if (inRange()) {
+
+  //  if (_turtle_cmd != TURTLECMD_HOLD) {
+      // go into loiter mode
+      printf("updating to hold command\n");
+      struct position_setpoint_triplet_s* pos_sp_triplet = get_position_setpoint_triplet();
+
+      pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_POSITION;
+      pos_sp_triplet->current.valid = true;
+      pos_sp_triplet->current.velocity_valid = false;
+      pos_sp_triplet->current.yaw = get_local_position()->yaw;
+      pos_sp_triplet->current.x = get_local_position()->x;
+      pos_sp_triplet->current.y = get_local_position()->y;
+      pos_sp_triplet->current.z = get_local_position()->z;
+      pos_sp_triplet->previous.yaw = pos_sp_triplet->current.yaw;
+      pos_sp_triplet->previous.x = pos_sp_triplet->current.x;
+      pos_sp_triplet->previous.y = pos_sp_triplet->current.y;
+      pos_sp_triplet->previous.z = pos_sp_triplet->current.z;
+      pos_sp_triplet->next.valid = false;
+      pos_sp_triplet->previous.valid = true;
+
+      set_can_loiter_at_sp(true);
+      set_position_setpoint_triplet_updated();
+    //}
+  } else if (_turtle_cmd == TURTLECMD_LEFT) {
+_turtle_cmd = TURTLECMD_HOLD;
+      printf("updating to left setpoint\n");
+    struct position_setpoint_triplet_s* pos_sp_triplet = get_position_setpoint_triplet();
+
+    pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_POSITION;
+    pos_sp_triplet->current.valid = true;
+    pos_sp_triplet->current.velocity_valid = true;
+    pos_sp_triplet->current.cruising_speed = 1.0;
+    pos_sp_triplet->current.yaw = get_local_position()->yaw+1.0f;
+    pos_sp_triplet->current.x = get_local_position()->x+1.0f;
+    pos_sp_triplet->current.y = get_local_position()->y+1.0f;
+    pos_sp_triplet->current.z = get_local_position()->z;
+    pos_sp_triplet->previous.yaw = get_local_position()->yaw;
+    pos_sp_triplet->previous.x = get_local_position()->x;
+    pos_sp_triplet->previous.y = get_local_position()->y;
+    pos_sp_triplet->previous.z = get_local_position()->z;
+    pos_sp_triplet->next.valid = false;
+    pos_sp_triplet->previous.valid = true;
+
+    set_can_loiter_at_sp(true);
+    set_position_setpoint_triplet_updated();
+  } else if (_turtle_cmd == TURTLECMD_RIGHT) {
+_turtle_cmd = TURTLECMD_HOLD;
+      printf("updating to right setpoint\n");
+    struct position_setpoint_triplet_s* pos_sp_triplet = get_position_setpoint_triplet();
+
+    pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_POSITION;
+    pos_sp_triplet->current.valid = true;
+    pos_sp_triplet->current.velocity_valid = true;
+    pos_sp_triplet->current.cruising_speed = 1.0;
+    pos_sp_triplet->current.yaw = get_local_position()->yaw;
+    pos_sp_triplet->current.x = get_local_position()->x-1.0f;
+    pos_sp_triplet->current.y = get_local_position()->y;
+    pos_sp_triplet->current.z = get_local_position()->z;
+    pos_sp_triplet->previous.yaw = get_local_position()->yaw;
+    pos_sp_triplet->previous.x = get_local_position()->x;
+    pos_sp_triplet->previous.y = get_local_position()->y;
+    pos_sp_triplet->previous.z = get_local_position()->z;
+    pos_sp_triplet->next.valid = false;
+    pos_sp_triplet->previous.valid = true;
+
+    set_can_loiter_at_sp(true);
+    set_position_setpoint_triplet_updated();
+  } else if (_turtle_cmd == TURTLECMD_HOLD) {
+    struct position_setpoint_triplet_s* pos_sp_triplet = get_position_setpoint_triplet();
+    pos_sp_triplet->current.type = position_setpoint_s::SETPOINT_TYPE_POSITION;
+    pos_sp_triplet->current.valid = true;
+    pos_sp_triplet->current.velocity_valid = true;
+    pos_sp_triplet->current.cruising_speed = 1.0;
+    pos_sp_triplet->current.yaw = 0.0f;
+    pos_sp_triplet->current.x = 0.0f;
+    pos_sp_triplet->current.y = 0.0f;
+    pos_sp_triplet->current.z = get_local_position()->z;
+    pos_sp_triplet->next.valid = false;
+    pos_sp_triplet->previous.yaw = get_local_position()->yaw;
+    pos_sp_triplet->previous.x = get_local_position()->x;
+    pos_sp_triplet->previous.y = get_local_position()->y;
+    pos_sp_triplet->previous.z = get_local_position()->z;
+    pos_sp_triplet->previous.valid = true;
+
+    set_can_loiter_at_sp(true);
+    set_position_setpoint_triplet_updated();
+
   }
 
-  if (PX4_ISFINITE(rep->current.x) && PX4_ISFINITE(rep->current.y)) {
-    up->current.x = rep->current.x;
-    up->current.y = rep->current.y;
+}
+
+bool
+TurtleNav::inRange()
+{
+  double dz = get_local_position()->z;
+  double dz_takeoff = get_takeoff_triplet()->current.z;
+  double delta = dz - dz_takeoff;
+  if (delta < 0.0) {
+    delta = -delta;
   }
 
-  // mark this as done
-  memset(rep, 0, sizeof(*rep));
+  return delta > 2.0;
 }
 
 int
@@ -507,7 +699,7 @@ TurtleNav::status()
 static void
 usage()
 {
-	warnx("usage: turtlenav {start|stop|status}");
+	warnx("usage: turtlenav {start|stop|status|takeoff}");
 }
 
 int
@@ -552,6 +744,12 @@ turtlenav_main(int argc, char *argv[])
 		turtlenav::g_turtlenav = nullptr;
 	} else if (!strcmp(argv[1], "status")) {
 		turtlenav::g_turtlenav->status();
+  } else if (!strcmp(argv[1], "takeoff")) {
+    turtlenav::g_turtlenav->setTurtleCmd(TURTLECMD_TAKEOFF);
+  } else if (!strcmp(argv[1], "left")) {
+    turtlenav::g_turtlenav->setTurtleCmd(TURTLECMD_LEFT);
+  } else if (!strcmp(argv[1], "right")) {
+     turtlenav::g_turtlenav->setTurtleCmd(TURTLECMD_RIGHT);
 	} else {
 		usage();
 		return 1;

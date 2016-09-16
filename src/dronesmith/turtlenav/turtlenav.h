@@ -20,6 +20,20 @@
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/sensor_combined.h>
 
+
+typedef enum {
+  TURTLECMD_HOLD = 0,
+  TURTLECMD_TAKEOFF,
+  TURTLECMD_LAND,
+  TURTLECMD_LEFT,
+  TURTLECMD_RIGHT,
+  TURTLECMD_DOWN,
+  TURTLECMD_UP,
+  TURTLECMD_FRONT,
+  TURTLECMD_BACK,
+  TURTLECMD_YAW
+} TurtleCmd;
+
 class TurtleNav
 {
 public:
@@ -48,10 +62,17 @@ public:
 	/**
 	 * Setters
 	 */
+  void		set_can_loiter_at_sp(bool can_loiter) { _can_loiter_at_sp = can_loiter; }
+  void		set_position_setpoint_triplet_updated() { _pos_sp_triplet_updated = true; }
+  void    setTurtleCmd(TurtleCmd t) { _turtle_cmd = t; }
 
 	/**
 	 * Getters
 	 */
+  struct vehicle_local_position_s*   get_local_position() { return &_local_pos; }
+  struct position_setpoint_triplet_s* get_takeoff_triplet() { return &_takeoff_triplet; }
+  struct position_setpoint_triplet_s* get_reposition_triplet() { return &_reposition_triplet; }
+  struct position_setpoint_triplet_s* get_position_setpoint_triplet() { return &_pos_sp_triplet; }
 
 private:
 
@@ -87,6 +108,12 @@ private:
   bool		_can_loiter_at_sp;			                      /**< flags if current position SP can be used to loiter */
 	bool		_pos_sp_triplet_updated;		                  /**< flags if position SP triplet needs to be published */
 	bool 		_pos_sp_triplet_published_invalid_once;	      /**< flags if position SP triplet has been published once to UORB */
+
+  TurtleCmd _turtle_cmd;
+
+  bool    inRange();
+
+  void    updateCmd();
 
   /**
    * Retrieve local position
