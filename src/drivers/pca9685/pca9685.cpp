@@ -317,7 +317,7 @@ PCA9685::i2cpwm()
 	} else {
 		if (!_mode_on_initialized) {
 			/* Subscribe to actuator control 2 (payload group for gimbal) */
-			_actuator_controls_sub = orb_subscribe(ORB_ID(actuator_controls_2));
+			_actuator_controls_sub = orb_subscribe(ORB_ID(actuator_controls_1));
 			/* set the uorb update interval lower than the driver pwm interval */
 			orb_set_interval(_actuator_controls_sub, 1000.0f / PCA9685_PWMFREQ - 5);
 
@@ -329,7 +329,7 @@ PCA9685::i2cpwm()
 		orb_check(_actuator_controls_sub, &updated);
 
 		if (updated) {
-			orb_copy(ORB_ID(actuator_controls_2), _actuator_controls_sub, &_actuator_controls);
+			orb_copy(ORB_ID(actuator_controls_1), _actuator_controls_sub, &_actuator_controls);
 
 			for (int i = 0; i < actuator_controls_s::NUM_ACTUATOR_CONTROLS; i++) {
 				/* Scale the controls to PWM, first multiply by pi to get rad,
