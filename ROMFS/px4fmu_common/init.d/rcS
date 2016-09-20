@@ -195,6 +195,9 @@ then
 	# set coprocessor
 	if ver hwcmp LUCI_V1
 	then
+		if pca9685 start
+		then
+		fi
 		param set SYS_COMPANION 921600
 		param save
 	fi

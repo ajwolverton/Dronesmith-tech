@@ -116,7 +116,13 @@ then
 	#
 
 	set MIXER_AUX_FILE none
-	set OUTPUT_AUX_DEV /dev/pwm_output1
+
+	if ver hwcmp LUCI_V1
+	then
+		set OUTPUT_AUX_DEV /dev/pca9685
+	else
+		set OUTPUT_AUX_DEV /dev/pwm_output1
+	fi
 
 	if [ -f $SDCARD_MIXERS_PATH/$MIXER_AUX.aux.mix ]
 	then
