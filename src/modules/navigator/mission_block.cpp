@@ -230,7 +230,7 @@ MissionBlock::is_mission_item_reached()
 					// set required yaw from bearing to the next mission item
 					if (_mission_item.force_heading) {
 						struct position_setpoint_s next_sp = _navigator->get_position_setpoint_triplet()->next;
-						
+
 						if (next_sp.valid) {
 							_mission_item.yaw = get_bearing_to_next_waypoint(_navigator->get_global_position()->lat,
 											_navigator->get_global_position()->lon,

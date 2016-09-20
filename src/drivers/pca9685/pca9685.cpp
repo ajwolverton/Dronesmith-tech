@@ -67,9 +67,15 @@
 #include <systemlib/perf_counter.h>
 #include <systemlib/err.h>
 #include <systemlib/systemlib.h>
+#include <systemlib/mixer/mixer.h>
+#include <systemlib/pwm_limit/pwm_limit.h>
+
+#include <drivers/drv_pwm_output.h>
 
 #include <uORB/uORB.h>
 #include <uORB/topics/actuator_controls.h>
+#include <uORB/topics/actuator_outputs.h>
+#include <uORB/topics/actuator_armed.h>
 
 #include <board_config.h>
 #include <drivers/drv_io_expander.h>
@@ -102,11 +108,13 @@
 #define PCA9685_PWMMAX 600 // this is the 'maximum' pulse length count (out of 4096)_PWMFREQ 60.0f
 
 #define PCA9685_PWMCENTER ((PCA9685_PWMMAX + PCA9685_PWMMIN)/2)
-#define PCA9685_MAXSERVODEG 90.0f /* maximal servo deflection in degrees
+#define PCA9685_MAXSERVODEG 180.0f /* maximal servo deflection in degrees
 				     PCA9685_PWMMIN <--> -PCA9685_MAXSERVODEG
 				     PCA9685_PWMMAX <--> PCA9685_MAXSERVODEG
 				     */
 #define PCA9685_SCALE ((PCA9685_PWMMAX - PCA9685_PWMCENTER)/(M_DEG_TO_RAD_F * PCA9685_MAXSERVODEG)) // scales from rad to PWM
+
+#define NAN_VALUE	(0.0f/0.0f)
 
 /* oddly, ERROR is not defined for c++ */
 #ifdef ERROR
@@ -127,6 +135,10 @@ public:
 	virtual int		reset();
 	bool			is_running() { return _running; }
 
+	void 					getActuation(struct actuator_controls_s* act, uint16_t offset);
+	void 					getMotors(uint16_t* motors);
+	bool 					MixerInit();
+
 private:
 	work_s			_work;
 
@@ -139,12 +151,24 @@ private:
 
 	uint8_t			_msg[6];
 
-	int			_actuator_controls_sub;
-	struct actuator_controls_s  _actuator_controls;
-	uint16_t	    	_current_values[actuator_controls_s::NUM_ACTUATOR_CONTROLS]; /**< stores the current pwm output
-										  values as sent to the setPin() */
+	int							_actuator_controls_sub;
+	struct actuator_controls_s _controls[actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS];
+	float 					_outputs[actuator_outputs_s::NUM_ACTUATOR_OUTPUTS];
+	uint16_t 				_rates[actuator_outputs_s::NUM_ACTUATOR_OUTPUTS];
+
+	int 						_armed_sub;
+
+	bool						_servo_armed;
+
+	MixerGroup* 		_mixers;
+	uint32_t				_groups_required;
+
+  static actuator_armed_s	_armed;
+	static pwm_limit_t	_pwm_limit;
 
 	bool _mode_on_initialized;  /** Set to true after the first call of i2cpwm in mode IOX_MODE_ON */
+
+	static bool	arm_nothrottle() { return (_armed.prearmed && !_armed.armed); }
 
 	static void		i2cpwm_trampoline(void *arg);
 	void			i2cpwm();
@@ -176,7 +200,15 @@ private:
 	/* Wrapper to wite a byte to addr */
 	int write8(uint8_t addr, uint8_t value);
 
+	static int	control_callback(uintptr_t handle,
+					 uint8_t control_group,
+					 uint8_t control_index,
+					 float &input);
+
 };
+
+actuator_armed_s	PCA9685::_armed = {};
+pwm_limit_t		PCA9685::_pwm_limit;
 
 /* for now, we only support one board */
 namespace
@@ -194,14 +226,19 @@ PCA9685::PCA9685(int bus, uint8_t address) :
 	_running(false),
 	_i2cpwm_interval(SEC2TICK(1.0f / 60.0f)),
 	_should_run(false),
-	_comms_errors(perf_alloc(PC_COUNT, "pca9685_com_err")),
+	_comms_errors(perf_alloc(PC_COUNT, "actuator_controls_1_comms_errors")),
 	_actuator_controls_sub(-1),
-	_actuator_controls(),
+	_armed_sub(-1),
+	_servo_armed(false),
+	_mixers(nullptr),
+	_groups_required(0),
 	_mode_on_initialized(false)
 {
 	memset(&_work, 0, sizeof(_work));
 	memset(_msg, 0, sizeof(_msg));
-	memset(_current_values, 0, sizeof(_current_values));
+	memset(_controls, 0, sizeof(_controls));
+	memset(_outputs, 0, sizeof(_outputs));
+	memset(_rates, 0, sizeof(_rates));
 }
 
 PCA9685::~PCA9685()
@@ -229,12 +266,114 @@ PCA9685::init()
 	return ret;
 }
 
+void
+PCA9685::getActuation(struct actuator_controls_s* act, uint16_t offset) {
+	if (offset < actuator_controls_s::NUM_ACTUATOR_CONTROLS) {
+		memcpy(act, &_controls[offset], sizeof(actuator_controls_s));
+	}
+}
+
+bool
+PCA9685::MixerInit() {
+	return _mixers != nullptr;
+}
+
+void
+PCA9685::getMotors(uint16_t* motors) {
+	for (size_t i = 0; i < actuator_outputs_s::NUM_ACTUATOR_OUTPUTS; ++i) {
+		motors[i] = _rates[i];
+	}
+}
+
+int
+PCA9685::control_callback(uintptr_t handle,
+			 uint8_t control_group,
+			 uint8_t control_index,
+			 float &input)
+{
+	const actuator_controls_s *controls = (actuator_controls_s *)handle;
+
+	input = controls[control_group].control[control_index];
+
+	/* limit control input */
+	if (input > 1.0f) {
+		input = 1.0f;
+
+	} else if (input < -1.0f) {
+		input = -1.0f;
+	}
+
+	return 0;
+}
+
 int
 PCA9685::ioctl(struct file *filp, int cmd, unsigned long arg)
 {
 	int ret = -EINVAL;
 
 	switch (cmd) {
+
+		case MIXERIOCRESET:
+			if (_mixers != nullptr) {
+				delete _mixers;
+				_mixers = nullptr;
+				_groups_required = 0;
+			}
+			ret = OK;
+			break;
+
+		case MIXERIOCADDSIMPLE: {
+			mixer_simple_s *mixinfo = (mixer_simple_s *)arg;
+
+			SimpleMixer *mixer = new SimpleMixer(control_callback,
+				(uintptr_t)_controls, mixinfo);
+
+			if (mixer->check()) {
+				delete mixer;
+				_groups_required = 0;
+				ret = -EINVAL;
+			} else {
+				if (_mixers == nullptr)
+					_mixers = new MixerGroup(control_callback,
+						(uintptr_t)_controls);
+
+				_mixers->add_mixer(mixer);
+				_mixers->groups_required(_groups_required);
+				ret = OK;
+			}
+
+			break;
+		}
+
+		case MIXERIOCLOADBUF: {
+			const char *buf = (const char *)arg;
+			unsigned buflen = strnlen(buf, 1024);
+
+			if (_mixers == nullptr) {
+				_mixers = new MixerGroup(control_callback,
+					(uintptr_t)_controls);
+			}
+
+			if (_mixers == nullptr) {
+				_groups_required = 0;
+				ret = -ENOMEM;
+			} else {
+				ret = _mixers->load_from_buf(buf, buflen);
+
+				if (ret != 0) {
+					DEVICE_DEBUG("mixer load failed with %d", ret);
+					delete _mixers;
+					_mixers = nullptr;
+					_groups_required = 0;
+					ret = -EINVAL;
+				} else {
+					_mixers->groups_required(_groups_required);
+					ret = OK;
+				}
+			}
+
+			break;
+		}
 
 	case IOX_SET_MODE:
 
@@ -316,36 +455,69 @@ PCA9685::i2cpwm()
 
 	} else {
 		if (!_mode_on_initialized) {
-			/* Subscribe to actuator control 2 (payload group for gimbal) */
+			// Init PWM limits
+			pwm_limit_init(&_pwm_limit);
+
+			// Get arming state
+			_armed_sub = orb_subscribe(ORB_ID(actuator_armed));
+
+			/* Subscribe to actuator control 1 (AUX device for Fixed wing / gimbal) */
 			_actuator_controls_sub = orb_subscribe(ORB_ID(actuator_controls_1));
+
 			/* set the uorb update interval lower than the driver pwm interval */
 			orb_set_interval(_actuator_controls_sub, 1000.0f / PCA9685_PWMFREQ - 5);
 
 			_mode_on_initialized = true;
 		}
 
-		/* Read the servo setpoints from the actuator control topics (gimbal) */
 		bool updated;
-		orb_check(_actuator_controls_sub, &updated);
 
+		// Update Arming state
+		orb_check(_armed_sub, &updated);
 		if (updated) {
-			orb_copy(ORB_ID(actuator_controls_1), _actuator_controls_sub, &_actuator_controls);
+			orb_copy(ORB_ID(actuator_armed), _armed_sub, &_armed);
 
-			for (int i = 0; i < actuator_controls_s::NUM_ACTUATOR_CONTROLS; i++) {
-				/* Scale the controls to PWM, first multiply by pi to get rad,
-				 * the control[i] values are on the range -1 ... 1 */
-				uint16_t new_value = PCA9685_PWMCENTER +
-						     (_actuator_controls.control[i] * M_PI_F * PCA9685_SCALE);
-				DEVICE_DEBUG("%d: current: %u, new %u, control %.2f", i, _current_values[i], new_value,
-					     (double)_actuator_controls.control[i]);
+			bool set_armed = (_armed.armed || _armed.prearmed) && !_armed.lockdown;
 
-				if (new_value != _current_values[i] &&
-				    isfinite(new_value) &&
+			if (_servo_armed != set_armed) {
+				_servo_armed = set_armed;
+			}
+		}
+
+		// Update AUX controls update
+		orb_check(_actuator_controls_sub, &updated);
+		if (updated) {
+			size_t num_outputs = actuator_outputs_s::NUM_ACTUATOR_OUTPUTS;
+
+			// Get updated actuator
+			// Only update actuator 1 for now
+			orb_copy(ORB_ID(actuator_controls_1), _actuator_controls_sub, &_controls[1]);
+
+			if (_mixers != nullptr) {
+				// do mixing
+				num_outputs = _mixers->mix(_outputs, num_outputs, NULL);
+
+				// disable unused ports by setting their output to NaN
+				for (size_t i = 0; i < sizeof(_outputs) / sizeof(_outputs[0]); i++) {
+					if (i >= num_outputs) {
+						_outputs[i] = NAN_VALUE;
+					}
+				}
+
+				// Finally, write servo values to motors
+				for (int i = 0; i < num_outputs; i++) {
+					uint16_t new_value = PCA9685_PWMCENTER +
+						     (_outputs[i] * M_PI_F * PCA9685_SCALE);
+					// DEVICE_DEBUG("%d: current: %u, new %u, control %.2f", i, _current_values[i], new_value,
+					//      (double)_controls[1].control[i]);
+
+					if (isfinite(new_value) &&
 				    new_value >= PCA9685_PWMMIN &&
 				    new_value <= PCA9685_PWMMAX) {
-					/* This value was updated, send the command to adjust the PWM value */
-					setPin(i, new_value);
-					_current_values[i] = new_value;
+
+						setPin(i, new_value);
+						_rates[i] = new_value;
+					}
 				}
 			}
 		}
@@ -631,6 +803,40 @@ pca9685_main(int argc, char *argv[])
 	if (!strcmp(verb, "reset")) {
 		g_pca9685->reset();
 		exit(0);
+	}
+
+	if (!strcmp(verb, "status")) {
+		if (g_pca9685 != nullptr) {
+			int i;
+			struct actuator_controls_s actuation;
+			uint16_t servoVals[actuator_outputs_s::NUM_ACTUATOR_OUTPUTS];
+
+			if (g_pca9685->MixerInit()) {
+				printf("Mixer initialized.\n");
+			} else {
+				printf("Mixer not initialized.\n");
+			}
+
+			g_pca9685->getActuation(&actuation, 1);
+			printf("Actuator Group 1 Status\n");
+			for (i = 0; i < actuator_controls_s::NUM_ACTUATOR_CONTROLS; ++i) {
+				double val = actuation.control[i];
+				printf("Act %d: %2.6f\n", i, val);
+			}
+
+			printf("\n");
+			g_pca9685->getMotors((uint16_t*)&servoVals);
+			printf("Raw Servos\n");
+			for (i = 0; i < actuator_outputs_s::NUM_ACTUATOR_OUTPUTS; ++i) {
+				uint16_t val = servoVals[i];
+				printf("Servo %d: %d\n", i, val);
+			}
+
+			exit(0);
+		} else {
+			warnx("PCA9685 isn't running.");
+			exit(1);
+		}
 	}
 
 
