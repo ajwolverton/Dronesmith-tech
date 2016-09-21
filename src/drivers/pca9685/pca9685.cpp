@@ -151,10 +151,13 @@ private:
 
 	uint8_t			_msg[6];
 
-	int							_actuator_controls_sub;
+	int							_control_subs[actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS];
+	orb_id_t				_control_topics[actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS];
 	struct actuator_controls_s _controls[actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS];
 	float 					_outputs[actuator_outputs_s::NUM_ACTUATOR_OUTPUTS];
 	uint16_t 				_rates[actuator_outputs_s::NUM_ACTUATOR_OUTPUTS];
+	pollfd					_poll_fds[actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS];
+	unsigned				_poll_fds_num;
 
 	int 						_armed_sub;
 
@@ -162,6 +165,7 @@ private:
 
 	MixerGroup* 		_mixers;
 	uint32_t				_groups_required;
+	uint32_t 				_groups_subscribed;
 
   static actuator_armed_s	_armed;
 	static pwm_limit_t	_pwm_limit;
@@ -172,6 +176,8 @@ private:
 
 	static void		i2cpwm_trampoline(void *arg);
 	void			i2cpwm();
+
+	void 			subscribe();
 
 	/**
 	 * Helper function to set the pwm frequency
@@ -227,16 +233,25 @@ PCA9685::PCA9685(int bus, uint8_t address) :
 	_i2cpwm_interval(SEC2TICK(1.0f / 60.0f)),
 	_should_run(false),
 	_comms_errors(perf_alloc(PC_COUNT, "actuator_controls_1_comms_errors")),
-	_actuator_controls_sub(-1),
+	_control_subs{-1},
+	_poll_fds_num(0),
 	_armed_sub(-1),
 	_servo_armed(false),
 	_mixers(nullptr),
 	_groups_required(0),
+	_groups_subscribed(0),
 	_mode_on_initialized(false)
 {
+
+	_control_topics[0] = ORB_ID(actuator_controls_0);
+	_control_topics[1] = ORB_ID(actuator_controls_1);
+	_control_topics[2] = ORB_ID(actuator_controls_2);
+	_control_topics[3] = ORB_ID(actuator_controls_3);
+
 	memset(&_work, 0, sizeof(_work));
 	memset(_msg, 0, sizeof(_msg));
 	memset(_controls, 0, sizeof(_controls));
+	memset(_poll_fds, 0, sizeof(_poll_fds));
 	memset(_outputs, 0, sizeof(_outputs));
 	memset(_rates, 0, sizeof(_rates));
 }
@@ -282,6 +297,34 @@ void
 PCA9685::getMotors(uint16_t* motors) {
 	for (size_t i = 0; i < actuator_outputs_s::NUM_ACTUATOR_OUTPUTS; ++i) {
 		motors[i] = _rates[i];
+	}
+}
+
+void
+PCA9685::subscribe()
+{
+	/* subscribe/unsubscribe to required actuator control groups */
+	uint32_t sub_groups = _groups_required & ~_groups_subscribed;
+	uint32_t unsub_groups = _groups_subscribed & ~_groups_required;
+	_poll_fds_num = 0;
+
+	for (unsigned i = 0; i < actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS; i++) {
+		if (sub_groups & (1 << i)) {
+			DEVICE_DEBUG("subscribe to actuator_controls_%d", i);
+			_control_subs[i] = orb_subscribe(_control_topics[i]);
+		}
+
+		if (unsub_groups & (1 << i)) {
+			DEVICE_DEBUG("unsubscribe from actuator_controls_%d", i);
+			::close(_control_subs[i]);
+			_control_subs[i] = -1;
+		}
+
+		if (_control_subs[i] > 0) {
+			_poll_fds[_poll_fds_num].fd = _control_subs[i];
+			_poll_fds[_poll_fds_num].events = POLLIN;
+			_poll_fds_num++;
+		}
 	}
 }
 
@@ -461,13 +504,67 @@ PCA9685::i2cpwm()
 			// Get arming state
 			_armed_sub = orb_subscribe(ORB_ID(actuator_armed));
 
-			/* Subscribe to actuator control 1 (AUX device for Fixed wing / gimbal) */
-			_actuator_controls_sub = orb_subscribe(ORB_ID(actuator_controls_1));
+			/* Subscribe to actuator groups */
+			subscribe();
 
 			/* set the uorb update interval lower than the driver pwm interval */
-			orb_set_interval(_actuator_controls_sub, 1000.0f / PCA9685_PWMFREQ - 5);
+			for (unsigned i = 0; i < actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS; ++i) {
+				orb_set_interval(_control_subs[i], 1000.0f / PCA9685_PWMFREQ - 5);
+			}
 
 			_mode_on_initialized = true;
+		}
+
+		/* check if anything updated */
+		int ret = ::poll(_poll_fds, _poll_fds_num, 0);
+
+		if (ret < 0) {
+			DEVICE_LOG("poll error %d", errno);
+
+		} else if (ret == 0) {
+	//			warnx("no PWM: failsafe");
+		} else {
+			/* get controls for required topics */
+			unsigned poll_id = 0;
+
+			for (unsigned i = 0; i < actuator_controls_s::NUM_ACTUATOR_CONTROL_GROUPS; i++) {
+				if (_control_subs[i] > 0) {
+					if (_poll_fds[poll_id].revents & POLLIN) {
+						orb_copy(_control_topics[i], _control_subs[i], &_controls[i]);
+					}
+				}
+				poll_id++;
+			}
+
+			if (_mixers != nullptr) {
+				size_t num_outputs = actuator_outputs_s::NUM_ACTUATOR_OUTPUTS;
+
+				// do mixing
+				num_outputs = _mixers->mix(_outputs, num_outputs, NULL);
+
+				// disable unused ports by setting their output to NaN
+				for (size_t i = 0; i < sizeof(_outputs) / sizeof(_outputs[0]); i++) {
+					if (i >= num_outputs) {
+						_outputs[i] = NAN_VALUE;
+					}
+				}
+
+				// Finally, write servo values to motors
+				for (int i = 0; i < num_outputs; i++) {
+					uint16_t new_value = PCA9685_PWMCENTER +
+								 (_outputs[i] * M_PI_F * PCA9685_SCALE);
+					// DEVICE_DEBUG("%d: current: %u, new %u, control %.2f", i, _current_values[i], new_value,
+					//      (double)_controls[1].control[i]);
+
+					if (isfinite(new_value) &&
+						new_value >= PCA9685_PWMMIN &&
+						new_value <= PCA9685_PWMMAX) {
+
+						setPin(i, new_value);
+						_rates[i] = new_value;
+					}
+				}
+			}
 		}
 
 		bool updated;
@@ -485,42 +582,16 @@ PCA9685::i2cpwm()
 		}
 
 		// Update AUX controls update
-		orb_check(_actuator_controls_sub, &updated);
-		if (updated) {
-			size_t num_outputs = actuator_outputs_s::NUM_ACTUATOR_OUTPUTS;
-
-			// Get updated actuator
-			// Only update actuator 1 for now
-			orb_copy(ORB_ID(actuator_controls_1), _actuator_controls_sub, &_controls[1]);
-
-			if (_mixers != nullptr) {
-				// do mixing
-				num_outputs = _mixers->mix(_outputs, num_outputs, NULL);
-
-				// disable unused ports by setting their output to NaN
-				for (size_t i = 0; i < sizeof(_outputs) / sizeof(_outputs[0]); i++) {
-					if (i >= num_outputs) {
-						_outputs[i] = NAN_VALUE;
-					}
-				}
-
-				// Finally, write servo values to motors
-				for (int i = 0; i < num_outputs; i++) {
-					uint16_t new_value = PCA9685_PWMCENTER +
-						     (_outputs[i] * M_PI_F * PCA9685_SCALE);
-					// DEVICE_DEBUG("%d: current: %u, new %u, control %.2f", i, _current_values[i], new_value,
-					//      (double)_controls[1].control[i]);
-
-					if (isfinite(new_value) &&
-				    new_value >= PCA9685_PWMMIN &&
-				    new_value <= PCA9685_PWMMAX) {
-
-						setPin(i, new_value);
-						_rates[i] = new_value;
-					}
-				}
-			}
-		}
+		// orb_check(_actuator_controls_sub, &updated);
+		// if (updated) {
+		// 	size_t num_outputs = actuator_outputs_s::NUM_ACTUATOR_OUTPUTS;
+		//
+		// 	// Get updated actuator
+		// 	// Only update actuator 1 for now
+		// 	orb_copy(ORB_ID(actuator_controls_1), _actuator_controls_sub, &_controls[1]);
+		//
+		//
+		// }
 
 		_should_run = true;
 	}
