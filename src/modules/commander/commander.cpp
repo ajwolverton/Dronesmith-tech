@@ -204,6 +204,8 @@ static float avionics_power_rail_voltage;		// voltage of the avionics power rail
 
 static bool can_arm_without_gps = false;
 
+static int32_t rc_bind_set = 0;
+
 
 /**
  * The daemon app only briefly exists to start
@@ -3933,7 +3935,8 @@ void *commander_low_prio_loop(void *arg)
 			case vehicle_command_s::VEHICLE_CMD_START_RX_PAIR:
 				/* Set RC_DSM_BIND to initiate the binding process */
 				if ((int)cmd.param1 == 0) {
-					param_set(param_find("RC_DSM_BIND"), &cmd.param2);
+					rc_bind_set = (int32_t)cmd.param2;
+					param_set(param_find("RC_DSM_BIND"), &rc_bind_set);
 					answer_command(cmd, vehicle_command_s::VEHICLE_CMD_RESULT_ACCEPTED, command_ack_pub, command_ack);
 				} else {
 					answer_command(cmd, vehicle_command_s::VEHICLE_CMD_RESULT_FAILED, command_ack_pub, command_ack);
